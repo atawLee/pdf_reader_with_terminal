@@ -68,3 +68,6 @@ final sidebarVisibleProvider = StateProvider<bool>((ref) => true);
 // ── Current page (driven by PdfViewerController, mirrored here for UI) ────
 final currentPageProvider = StateProvider<int>((ref) => 1);
 final totalPagesProvider = StateProvider<int>((ref) => 0);
+
+// ── Terminal panel ────────────────────────────────────────────────────────
+final terminalVisibleProvider = StateProvider<bool>((ref) => false);

@@ -1,11 +1,13 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
 import '../providers/pdf_providers.dart';
 import '../widgets/pdf_viewer_widget.dart';
 import '../widgets/sidebar_widget.dart';
+import '../widgets/terminal_widget.dart';
 
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
@@ -32,8 +34,19 @@ class HomeScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final currentPath = ref.watch(currentPdfPathProvider);
     final sidebarVisible = ref.watch(sidebarVisibleProvider);
+    final terminalVisible = ref.watch(terminalVisibleProvider);
 
-    return Scaffold(
+    return Focus(
+      autofocus: true,
+      child: CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.backquote,
+            control: true): () {
+          ref.read(terminalVisibleProvider.notifier).state =
+              !ref.read(terminalVisibleProvider);
+        },
+      },
+      child: Scaffold(
       backgroundColor: const Color(0xFF181825),
       body: Column(
         children: [
@@ -53,17 +66,108 @@ class HomeScreen extends ConsumerWidget {
                       : const SizedBox.shrink(),
                 ),
 
-                // Main content
+                // Main content + terminal
                 Expanded(
-                  child: currentPath == null
-                      ? const _EmptyState()
-                      : PdfViewerWidget(key: ValueKey(currentPath), filePath: currentPath),
+                  child: _MainContentArea(
+                    currentPath: currentPath,
+                    terminalVisible: terminalVisible,
+                  ),
                 ),
               ],
             ),
           ),
         ],
       ),
+      ),
+    ),
+    );
+  }
+}
+
+class _MainContentArea extends StatefulWidget {
+  const _MainContentArea({
+    required this.currentPath,
+    required this.terminalVisible,
+  });
+
+  final String? currentPath;
+  final bool terminalVisible;
+
+  @override
+  State<_MainContentArea> createState() => _MainContentAreaState();
+}
+
+class _MainContentAreaState extends State<_MainContentArea> {
+  double _terminalHeight = 220;
+  static const _minTerminalHeight = 100.0;
+  static const _dividerHeight = 6.0;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxTerminalHeight = constraints.maxHeight * 0.7;
+        final clampedHeight =
+            _terminalHeight.clamp(_minTerminalHeight, maxTerminalHeight);
+
+        if (!widget.terminalVisible) {
+          return widget.currentPath == null
+              ? const _EmptyState()
+              : PdfViewerWidget(
+                  key: ValueKey(widget.currentPath),
+                  filePath: widget.currentPath!,
+                );
+        }
+
+        return Column(
+          children: [
+            // PDF viewer / empty state
+            Expanded(
+              child: widget.currentPath == null
+                  ? const _EmptyState()
+                  : PdfViewerWidget(
+                      key: ValueKey(widget.currentPath),
+                      filePath: widget.currentPath!,
+                    ),
+            ),
+
+            // Resize handle
+            MouseRegion(
+              cursor: SystemMouseCursors.resizeRow,
+              child: GestureDetector(
+                onVerticalDragUpdate: (details) {
+                  setState(() {
+                    _terminalHeight = (_terminalHeight - details.delta.dy)
+                        .clamp(_minTerminalHeight, maxTerminalHeight);
+                  });
+                },
+                child: Container(
+                  height: _dividerHeight,
+                  color: const Color(0xFF313244),
+                  child: const Center(
+                    child: SizedBox(
+                      width: 40,
+                      height: 2,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: Color(0xFF45475A),
+                          borderRadius: BorderRadius.all(Radius.circular(1)),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+            // Terminal panel
+            SizedBox(
+              height: clampedHeight,
+              child: const TerminalWidget(),
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -128,6 +232,21 @@ class _TopBar extends ConsumerWidget {
               ),
           ] else
             const Spacer(),
+
+          // Terminal toggle
+          IconButton(
+            icon: Icon(
+              Icons.terminal,
+              size: 16,
+              color: ref.watch(terminalVisibleProvider)
+                  ? const Color(0xFF89B4FA)
+                  : const Color(0xFF6C7086),
+            ),
+            tooltip: '터미널 (Ctrl+`)',
+            onPressed: () => ref
+                .read(terminalVisibleProvider.notifier)
+                .state = !ref.read(terminalVisibleProvider),
+          ),
 
           // Open button
           TextButton.icon(

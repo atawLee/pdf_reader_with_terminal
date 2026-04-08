@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import '../providers/pdf_providers.dart';
+import '../services/ocr_service.dart';
 
 class PdfViewerWidget extends ConsumerStatefulWidget {
   const PdfViewerWidget({super.key, required this.filePath});
@@ -85,7 +86,10 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
             left: 0,
             right: 0,
             bottom: 0,
-            child: _BottomToolbar(controller: _controller),
+            child: _BottomToolbar(
+              controller: _controller,
+              filePath: widget.filePath,
+            ),
           ),
         ],
       ),
@@ -110,8 +114,9 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
 }
 
 class _BottomToolbar extends ConsumerStatefulWidget {
-  const _BottomToolbar({required this.controller});
+  const _BottomToolbar({required this.controller, required this.filePath});
   final PdfViewerController controller;
+  final String filePath;
 
   @override
   ConsumerState<_BottomToolbar> createState() => _BottomToolbarState();
@@ -246,8 +251,151 @@ class _BottomToolbarState extends ConsumerState<_BottomToolbar> {
                 ? () => widget.controller.goToPage(pageNumber: current + 1)
                 : null,
           ),
+
+          const SizedBox(width: 16),
+          const VerticalDivider(
+              color: Color(0xFF313244), width: 1, indent: 8, endIndent: 8),
+          const SizedBox(width: 16),
+
+          // OCR
+          _ToolbarButton(
+            icon: Icons.document_scanner,
+            tooltip: 'OCR 텍스트 추출',
+            onPressed: total > 0
+                ? () => _runOcr(context, current)
+                : null,
+          ),
         ],
       ),
+    );
+  }
+
+  void _runOcr(BuildContext context, int pageNumber) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _OcrResultDialog(
+        filePath: widget.filePath,
+        pageNumber: pageNumber,
+      ),
+    );
+  }
+}
+
+class _OcrResultDialog extends StatefulWidget {
+  const _OcrResultDialog({
+    required this.filePath,
+    required this.pageNumber,
+  });
+
+  final String filePath;
+  final int pageNumber;
+
+  @override
+  State<_OcrResultDialog> createState() => _OcrResultDialogState();
+}
+
+class _OcrResultDialogState extends State<_OcrResultDialog> {
+  String? _text;
+  String? _error;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _performOcr();
+  }
+
+  Future<void> _performOcr() async {
+    try {
+      final text = await OcrService.recognizePage(
+        widget.filePath,
+        widget.pageNumber,
+      );
+      if (mounted) setState(() { _text = text; _loading = false; });
+    } catch (e) {
+      if (mounted) setState(() { _error = e.toString(); _loading = false; });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: const Color(0xFF1E1E2E),
+      title: Row(
+        children: [
+          const Icon(Icons.document_scanner,
+              color: Color(0xFF89B4FA), size: 20),
+          const SizedBox(width: 8),
+          Text(
+            'OCR — ${widget.pageNumber}페이지',
+            style: const TextStyle(
+                color: Color(0xFFCDD6F4), fontSize: 16),
+          ),
+          const Spacer(),
+          if (_text != null)
+            IconButton(
+              icon: const Icon(Icons.copy, size: 18),
+              tooltip: '복사',
+              color: const Color(0xFF89B4FA),
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: _text!));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('클립보드에 복사되었습니다'),
+                    duration: Duration(seconds: 1),
+                  ),
+                );
+              },
+            ),
+        ],
+      ),
+      content: SizedBox(
+        width: 500,
+        height: 400,
+        child: _loading
+            ? const Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(color: Color(0xFF89B4FA)),
+                    SizedBox(height: 16),
+                    Text(
+                      'OCR 처리 중...',
+                      style: TextStyle(color: Color(0xFF6C7086)),
+                    ),
+                  ],
+                ),
+              )
+            : _error != null
+                ? Center(
+                    child: Text(
+                      _error!,
+                      style: const TextStyle(color: Color(0xFFF38BA8)),
+                    ),
+                  )
+                : _text!.isEmpty
+                    ? const Center(
+                        child: Text(
+                          '인식된 텍스트가 없습니다',
+                          style: TextStyle(color: Color(0xFF6C7086)),
+                        ),
+                      )
+                    : SelectableText(
+                        _text!,
+                        style: const TextStyle(
+                          color: Color(0xFFCDD6F4),
+                          fontSize: 14,
+                          height: 1.6,
+                        ),
+                      ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('닫기'),
+        ),
+      ],
     );
   }
 }
