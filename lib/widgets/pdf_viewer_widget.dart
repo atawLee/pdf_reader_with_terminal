@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 import 'package:pdfrx/pdfrx.dart';
 
 import '../providers/pdf_providers.dart';
@@ -34,15 +35,19 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
   late final TextEditingController _noteController;
   Timer? _saveTimer;
   bool _noteDirty = false;
+  int _notePage = 1;
 
-  String get _noteFilePath => '${widget.filePath}.notes.md';
+  String _noteFilePathForPage(int page) {
+    final dir = p.dirname(widget.filePath);
+    final name = p.basenameWithoutExtension(widget.filePath);
+    return p.join(dir, '${name}_$page.md');
+  }
 
   @override
   void initState() {
     super.initState();
     _controller = PdfViewerController();
     _noteController = TextEditingController();
-    _loadNote();
   }
 
   @override
@@ -95,12 +100,24 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
 
   // ── Note ───────────────────────────────────────────────────────────────────
 
-  Future<void> _loadNote() async {
-    final file = File(_noteFilePath);
+  /// Save current note, then load the note for [page].
+  Future<void> _switchNotePage(int page) async {
+    if (page == _notePage && _noteController.text.isNotEmpty) return;
+    // Save current page note first.
+    if (_noteDirty) await _saveNote();
+    _notePage = page;
+    await _loadNote(page);
+  }
+
+  Future<void> _loadNote(int page) async {
+    final file = File(_noteFilePathForPage(page));
     if (await file.exists()) {
       final content = await file.readAsString();
       _noteController.text = content;
+    } else {
+      _noteController.clear();
     }
+    _noteDirty = false;
   }
 
   void _onNoteChanged() {
@@ -112,11 +129,24 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
   Future<void> _saveNote() async {
     if (!_noteDirty) return;
     _noteDirty = false;
-    await File(_noteFilePath).writeAsString(_noteController.text);
+    final filePath = _noteFilePathForPage(_notePage);
+    if (_noteController.text.isEmpty) {
+      // Remove empty note files.
+      final file = File(filePath);
+      if (await file.exists()) await file.delete();
+    } else {
+      await File(filePath).writeAsString(_noteController.text);
+    }
   }
 
   void _saveNoteSync() {
-    File(_noteFilePath).writeAsStringSync(_noteController.text);
+    final filePath = _noteFilePathForPage(_notePage);
+    if (_noteController.text.isEmpty) {
+      final file = File(filePath);
+      if (file.existsSync()) file.deleteSync();
+    } else {
+      File(filePath).writeAsStringSync(_noteController.text);
+    }
     _noteDirty = false;
   }
 
@@ -148,6 +178,7 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
                     onPageChanged: (page) {
                       if (page != null) {
                         ref.read(currentPageProvider.notifier).state = page;
+                        if (_noteVisible) _switchNotePage(page);
                       }
                     },
                     layoutPages: (pages, params) {
@@ -185,8 +216,17 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
                     ocrVisible: _ocrVisible,
                     noteVisible: _noteVisible,
                     onOcrPressed: (page) => _toggleOcr(page),
-                    onNotePressed: () =>
-                        setState(() => _noteVisible = !_noteVisible),
+                    onNotePressed: () {
+                      if (_noteVisible) {
+                        if (_noteDirty) _saveNote();
+                        setState(() => _noteVisible = false);
+                      } else {
+                        final page = ref.read(currentPageProvider);
+                        _notePage = page;
+                        _loadNote(page);
+                        setState(() => _noteVisible = true);
+                      }
+                    },
                   ),
                 ),
               ],
@@ -218,9 +258,13 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
           SizedBox(
             width: 360,
             child: _NoteSidePanel(
+              pageNumber: _notePage,
               controller: _noteController,
               onChanged: _onNoteChanged,
-              onClose: () => setState(() => _noteVisible = false),
+              onClose: () {
+                if (_noteDirty) _saveNote();
+                setState(() => _noteVisible = false);
+              },
             ),
           ),
         ],
@@ -365,11 +409,13 @@ class _OcrSidePanel extends StatelessWidget {
 
 class _NoteSidePanel extends StatelessWidget {
   const _NoteSidePanel({
+    required this.pageNumber,
     required this.controller,
     required this.onChanged,
     required this.onClose,
   });
 
+  final int pageNumber;
   final TextEditingController controller;
   final VoidCallback onChanged;
   final VoidCallback onClose;
@@ -382,7 +428,7 @@ class _NoteSidePanel extends StatelessWidget {
         children: [
           _PanelHeader(
             icon: Icons.edit_note,
-            title: '노트',
+            title: '노트 — $pageNumber페이지',
             actions: [
               _PanelButton(
                 icon: Icons.copy,
