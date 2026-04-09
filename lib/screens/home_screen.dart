@@ -109,18 +109,9 @@ class _MainContentAreaState extends State<_MainContentArea> {
         final clampedHeight =
             _terminalHeight.clamp(_minTerminalHeight, maxTerminalHeight);
 
-        if (!widget.terminalVisible) {
-          return widget.currentPath == null
-              ? const _EmptyState()
-              : PdfViewerWidget(
-                  key: ValueKey(widget.currentPath),
-                  filePath: widget.currentPath!,
-                );
-        }
-
         return Column(
           children: [
-            // PDF viewer / empty state
+            // PDF viewer / empty state (always in same tree position)
             Expanded(
               child: widget.currentPath == null
                   ? const _EmptyState()
@@ -130,40 +121,43 @@ class _MainContentAreaState extends State<_MainContentArea> {
                     ),
             ),
 
-            // Resize handle
-            MouseRegion(
-              cursor: SystemMouseCursors.resizeRow,
-              child: GestureDetector(
-                onVerticalDragUpdate: (details) {
-                  setState(() {
-                    _terminalHeight = (_terminalHeight - details.delta.dy)
-                        .clamp(_minTerminalHeight, maxTerminalHeight);
-                  });
-                },
-                child: Container(
-                  height: _dividerHeight,
-                  color: const Color(0xFF313244),
-                  child: const Center(
-                    child: SizedBox(
-                      width: 40,
-                      height: 2,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: Color(0xFF45475A),
-                          borderRadius: BorderRadius.all(Radius.circular(1)),
+            if (widget.terminalVisible) ...[
+              // Resize handle
+              MouseRegion(
+                cursor: SystemMouseCursors.resizeRow,
+                child: GestureDetector(
+                  onVerticalDragUpdate: (details) {
+                    setState(() {
+                      _terminalHeight = (_terminalHeight - details.delta.dy)
+                          .clamp(_minTerminalHeight, maxTerminalHeight);
+                    });
+                  },
+                  child: Container(
+                    height: _dividerHeight,
+                    color: const Color(0xFF313244),
+                    child: const Center(
+                      child: SizedBox(
+                        width: 40,
+                        height: 2,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: Color(0xFF45475A),
+                            borderRadius:
+                                BorderRadius.all(Radius.circular(1)),
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
               ),
-            ),
 
-            // Terminal panel
-            SizedBox(
-              height: clampedHeight,
-              child: const TerminalWidget(),
-            ),
+              // Terminal panel
+              SizedBox(
+                height: clampedHeight,
+                child: const TerminalWidget(),
+              ),
+            ],
           ],
         );
       },

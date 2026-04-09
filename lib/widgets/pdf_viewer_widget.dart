@@ -36,6 +36,7 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
   Timer? _saveTimer;
   bool _noteDirty = false;
   int _notePage = 1;
+  double _noteWidth = 360;
 
   String _noteFilePathForPage(int page) {
     final dir = p.dirname(widget.filePath);
@@ -154,121 +155,159 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        // PDF viewer area
-        Expanded(
-          child: KeyboardListener(
-            focusNode: _focusNode,
-            autofocus: true,
-            onKeyEvent: _handleKey,
-            child: Stack(
-              children: [
-                PdfViewer.file(
-                  widget.filePath,
-                  controller: _controller,
-                  params: PdfViewerParams(
-                    backgroundColor: const Color(0xFF181825),
-                    margin: 8,
-                    onViewerReady: (document, controller) {
-                      ref.read(totalPagesProvider.notifier).state =
-                          document.pages.length;
-                      ref.read(currentPageProvider.notifier).state = 1;
-                    },
-                    onPageChanged: (page) {
-                      if (page != null) {
-                        ref.read(currentPageProvider.notifier).state = page;
-                        if (_noteVisible) _switchNotePage(page);
-                      }
-                    },
-                    layoutPages: (pages, params) {
-                      final width = pages.fold(
-                          0.0, (max, p) => p.width > max ? p.width : max);
-                      double y = params.margin;
-                      final rects = <Rect>[];
-                      for (final page in pages) {
-                        rects.add(Rect.fromLTWH(
-                          (width - page.width) / 2 + params.margin,
-                          y,
-                          page.width,
-                          page.height,
-                        ));
-                        y += page.height + params.margin;
-                      }
-                      return PdfPageLayout(
-                        pageLayouts: rects,
-                        documentSize: Size(
-                          width + params.margin * 2,
-                          y,
+    const minNoteWidth = 240.0;
+    const maxNoteWidth = 600.0;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final clampedNoteWidth =
+            _noteWidth.clamp(minNoteWidth, maxNoteWidth);
+
+        return Row(
+          children: [
+            // Note side panel (left)
+            if (_noteVisible) ...[
+              SizedBox(
+                width: clampedNoteWidth,
+                child: _NoteSidePanel(
+                  pageNumber: _notePage,
+                  controller: _noteController,
+                  onChanged: _onNoteChanged,
+                  onClose: () {
+                    if (_noteDirty) _saveNote();
+                    setState(() => _noteVisible = false);
+                  },
+                ),
+              ),
+              MouseRegion(
+                cursor: SystemMouseCursors.resizeColumn,
+                child: GestureDetector(
+                  onHorizontalDragUpdate: (details) {
+                    setState(() {
+                      _noteWidth = (_noteWidth + details.delta.dx)
+                          .clamp(minNoteWidth, maxNoteWidth);
+                    });
+                  },
+                  child: Container(
+                    width: 6,
+                    color: const Color(0xFF313244),
+                    child: const Center(
+                      child: SizedBox(
+                        width: 2,
+                        height: 40,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: Color(0xFF45475A),
+                            borderRadius:
+                                BorderRadius.all(Radius.circular(1)),
+                          ),
                         ),
-                      );
-                    },
+                      ),
+                    ),
                   ),
                 ),
+              ),
+            ],
 
-                // Bottom toolbar
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: _BottomToolbar(
-                    controller: _controller,
-                    ocrVisible: _ocrVisible,
-                    noteVisible: _noteVisible,
-                    onOcrPressed: (page) => _toggleOcr(page),
-                    onNotePressed: () {
-                      if (_noteVisible) {
-                        if (_noteDirty) _saveNote();
-                        setState(() => _noteVisible = false);
-                      } else {
-                        final page = ref.read(currentPageProvider);
-                        _notePage = page;
-                        _loadNote(page);
-                        setState(() => _noteVisible = true);
-                      }
-                    },
-                  ),
+            // PDF viewer area (center)
+            Expanded(
+              child: KeyboardListener(
+                focusNode: _focusNode,
+                autofocus: true,
+                onKeyEvent: _handleKey,
+                child: Stack(
+                  children: [
+                    PdfViewer.file(
+                      widget.filePath,
+                      controller: _controller,
+                      params: PdfViewerParams(
+                        backgroundColor: const Color(0xFF181825),
+                        margin: 8,
+                        onViewerReady: (document, controller) {
+                          ref.read(totalPagesProvider.notifier).state =
+                              document.pages.length;
+                          ref.read(currentPageProvider.notifier).state = 1;
+                        },
+                        onPageChanged: (page) {
+                          if (page != null) {
+                            ref.read(currentPageProvider.notifier).state =
+                                page;
+                            if (_noteVisible) _switchNotePage(page);
+                          }
+                        },
+                        layoutPages: (pages, params) {
+                          final width = pages.fold(0.0,
+                              (max, p) => p.width > max ? p.width : max);
+                          double y = params.margin;
+                          final rects = <Rect>[];
+                          for (final page in pages) {
+                            rects.add(Rect.fromLTWH(
+                              (width - page.width) / 2 + params.margin,
+                              y,
+                              page.width,
+                              page.height,
+                            ));
+                            y += page.height + params.margin;
+                          }
+                          return PdfPageLayout(
+                            pageLayouts: rects,
+                            documentSize: Size(
+                              width + params.margin * 2,
+                              y,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+
+                    // Bottom toolbar
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: _BottomToolbar(
+                        controller: _controller,
+                        ocrVisible: _ocrVisible,
+                        noteVisible: _noteVisible,
+                        onOcrPressed: (page) => _toggleOcr(page),
+                        onNotePressed: () {
+                          if (_noteVisible) {
+                            if (_noteDirty) _saveNote();
+                            setState(() => _noteVisible = false);
+                          } else {
+                            final page = ref.read(currentPageProvider);
+                            _notePage = page;
+                            _loadNote(page);
+                            setState(() => _noteVisible = true);
+                          }
+                        },
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
-          ),
-        ),
 
-        // OCR side panel
-        if (_ocrVisible) ...[
-          const VerticalDivider(
-              width: 1, thickness: 1, color: Color(0xFF313244)),
-          SizedBox(
-            width: 340,
-            child: _OcrSidePanel(
-              pageNumber: _ocrPage,
-              loading: _ocrLoading,
-              text: _ocrText,
-              error: _ocrError,
-              onClose: () => setState(() => _ocrVisible = false),
-              onRefresh: () => _toggleOcr(ref.read(currentPageProvider)),
-            ),
-          ),
-        ],
-
-        // Note side panel
-        if (_noteVisible) ...[
-          const VerticalDivider(
-              width: 1, thickness: 1, color: Color(0xFF313244)),
-          SizedBox(
-            width: 360,
-            child: _NoteSidePanel(
-              pageNumber: _notePage,
-              controller: _noteController,
-              onChanged: _onNoteChanged,
-              onClose: () {
-                if (_noteDirty) _saveNote();
-                setState(() => _noteVisible = false);
-              },
-            ),
-          ),
-        ],
-      ],
+            // OCR side panel (right)
+            if (_ocrVisible) ...[
+              const VerticalDivider(
+                  width: 1, thickness: 1, color: Color(0xFF313244)),
+              SizedBox(
+                width: 340,
+                child: _OcrSidePanel(
+                  pageNumber: _ocrPage,
+                  loading: _ocrLoading,
+                  text: _ocrText,
+                  error: _ocrError,
+                  onClose: () => setState(() => _ocrVisible = false),
+                  onRefresh: () =>
+                      _toggleOcr(ref.read(currentPageProvider)),
+                ),
+              ),
+            ],
+          ],
+        );
+      },
     );
   }
 
