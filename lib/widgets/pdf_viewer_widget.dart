@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -19,80 +22,209 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
   late final PdfViewerController _controller;
   final FocusNode _focusNode = FocusNode();
 
+  // OCR side panel state
+  bool _ocrVisible = false;
+  bool _ocrLoading = false;
+  String? _ocrText;
+  String? _ocrError;
+  int _ocrPage = 0;
+
+  // Note side panel state
+  bool _noteVisible = false;
+  late final TextEditingController _noteController;
+  Timer? _saveTimer;
+  bool _noteDirty = false;
+
+  String get _noteFilePath => '${widget.filePath}.notes.md';
+
   @override
   void initState() {
     super.initState();
     _controller = PdfViewerController();
+    _noteController = TextEditingController();
+    _loadNote();
   }
 
   @override
   void dispose() {
+    if (_noteDirty) _saveNoteSync();
+    _saveTimer?.cancel();
+    _noteController.dispose();
     _focusNode.dispose();
     super.dispose();
   }
 
+  // ── OCR ────────────────────────────────────────────────────────────────────
+
+  void _toggleOcr(int pageNumber) {
+    if (_ocrVisible && _ocrPage == pageNumber) {
+      setState(() => _ocrVisible = false);
+      return;
+    }
+    setState(() {
+      _ocrVisible = true;
+      _ocrLoading = true;
+      _ocrText = null;
+      _ocrError = null;
+      _ocrPage = pageNumber;
+    });
+    _performOcr(pageNumber);
+  }
+
+  Future<void> _performOcr(int pageNumber) async {
+    try {
+      final text = await OcrService.recognizePage(
+        widget.filePath,
+        pageNumber,
+      );
+      if (mounted && _ocrPage == pageNumber) {
+        setState(() {
+          _ocrText = text;
+          _ocrLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted && _ocrPage == pageNumber) {
+        setState(() {
+          _ocrError = e.toString();
+          _ocrLoading = false;
+        });
+      }
+    }
+  }
+
+  // ── Note ───────────────────────────────────────────────────────────────────
+
+  Future<void> _loadNote() async {
+    final file = File(_noteFilePath);
+    if (await file.exists()) {
+      final content = await file.readAsString();
+      _noteController.text = content;
+    }
+  }
+
+  void _onNoteChanged() {
+    _noteDirty = true;
+    _saveTimer?.cancel();
+    _saveTimer = Timer(const Duration(seconds: 1), _saveNote);
+  }
+
+  Future<void> _saveNote() async {
+    if (!_noteDirty) return;
+    _noteDirty = false;
+    await File(_noteFilePath).writeAsString(_noteController.text);
+  }
+
+  void _saveNoteSync() {
+    File(_noteFilePath).writeAsStringSync(_noteController.text);
+    _noteDirty = false;
+  }
+
+  // ── Build ──────────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
-    return KeyboardListener(
-      focusNode: _focusNode,
-      autofocus: true,
-      onKeyEvent: _handleKey,
-      child: Stack(
-        children: [
-          PdfViewer.file(
-            widget.filePath,
-            controller: _controller,
-            params: PdfViewerParams(
-              backgroundColor: const Color(0xFF181825),
-              margin: 8,
-              onViewerReady: (document, controller) {
-                ref.read(totalPagesProvider.notifier).state =
-                    document.pages.length;
-                ref.read(currentPageProvider.notifier).state = 1;
-              },
-              onPageChanged: (page) {
-                if (page != null) {
-                  ref.read(currentPageProvider.notifier).state = page;
-                }
-              },
-              layoutPages: (pages, params) {
-                // 단일 열 세로 레이아웃
-                final width = pages.fold(0.0,
-                    (max, p) => p.width > max ? p.width : max);
-                double y = params.margin;
-                final rects = <Rect>[];
-                for (final page in pages) {
-                  rects.add(Rect.fromLTWH(
-                    (width - page.width) / 2 + params.margin,
-                    y,
-                    page.width,
-                    page.height,
-                  ));
-                  y += page.height + params.margin;
-                }
-                return PdfPageLayout(
-                  pageLayouts: rects,
-                  documentSize: Size(
-                    width + params.margin * 2,
-                    y,
+    return Row(
+      children: [
+        // PDF viewer area
+        Expanded(
+          child: KeyboardListener(
+            focusNode: _focusNode,
+            autofocus: true,
+            onKeyEvent: _handleKey,
+            child: Stack(
+              children: [
+                PdfViewer.file(
+                  widget.filePath,
+                  controller: _controller,
+                  params: PdfViewerParams(
+                    backgroundColor: const Color(0xFF181825),
+                    margin: 8,
+                    onViewerReady: (document, controller) {
+                      ref.read(totalPagesProvider.notifier).state =
+                          document.pages.length;
+                      ref.read(currentPageProvider.notifier).state = 1;
+                    },
+                    onPageChanged: (page) {
+                      if (page != null) {
+                        ref.read(currentPageProvider.notifier).state = page;
+                      }
+                    },
+                    layoutPages: (pages, params) {
+                      final width = pages.fold(
+                          0.0, (max, p) => p.width > max ? p.width : max);
+                      double y = params.margin;
+                      final rects = <Rect>[];
+                      for (final page in pages) {
+                        rects.add(Rect.fromLTWH(
+                          (width - page.width) / 2 + params.margin,
+                          y,
+                          page.width,
+                          page.height,
+                        ));
+                        y += page.height + params.margin;
+                      }
+                      return PdfPageLayout(
+                        pageLayouts: rects,
+                        documentSize: Size(
+                          width + params.margin * 2,
+                          y,
+                        ),
+                      );
+                    },
                   ),
-                );
-              },
+                ),
+
+                // Bottom toolbar
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: _BottomToolbar(
+                    controller: _controller,
+                    ocrVisible: _ocrVisible,
+                    noteVisible: _noteVisible,
+                    onOcrPressed: (page) => _toggleOcr(page),
+                    onNotePressed: () =>
+                        setState(() => _noteVisible = !_noteVisible),
+                  ),
+                ),
+              ],
             ),
           ),
+        ),
 
-          // Bottom toolbar
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: _BottomToolbar(
-              controller: _controller,
-              filePath: widget.filePath,
+        // OCR side panel
+        if (_ocrVisible) ...[
+          const VerticalDivider(
+              width: 1, thickness: 1, color: Color(0xFF313244)),
+          SizedBox(
+            width: 340,
+            child: _OcrSidePanel(
+              pageNumber: _ocrPage,
+              loading: _ocrLoading,
+              text: _ocrText,
+              error: _ocrError,
+              onClose: () => setState(() => _ocrVisible = false),
+              onRefresh: () => _toggleOcr(ref.read(currentPageProvider)),
             ),
           ),
         ],
-      ),
+
+        // Note side panel
+        if (_noteVisible) ...[
+          const VerticalDivider(
+              width: 1, thickness: 1, color: Color(0xFF313244)),
+          SizedBox(
+            width: 360,
+            child: _NoteSidePanel(
+              controller: _noteController,
+              onChanged: _onNoteChanged,
+              onClose: () => setState(() => _noteVisible = false),
+            ),
+          ),
+        ],
+      ],
     );
   }
 
@@ -113,10 +245,286 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
   }
 }
 
+// ── OCR Side Panel ──────────────────────────────────────────────────────────
+
+class _OcrSidePanel extends StatelessWidget {
+  const _OcrSidePanel({
+    required this.pageNumber,
+    required this.loading,
+    required this.text,
+    required this.error,
+    required this.onClose,
+    required this.onRefresh,
+  });
+
+  final int pageNumber;
+  final bool loading;
+  final String? text;
+  final String? error;
+  final VoidCallback onClose;
+  final VoidCallback onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: const Color(0xFF1E1E2E),
+      child: Column(
+        children: [
+          _PanelHeader(
+            icon: Icons.document_scanner,
+            title: 'OCR — $pageNumber페이지',
+            actions: [
+              if (text != null)
+                _PanelButton(
+                  icon: Icons.copy,
+                  tooltip: '복사',
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: text!));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('클립보드에 복사되었습니다'),
+                        duration: Duration(seconds: 1),
+                      ),
+                    );
+                  },
+                ),
+              _PanelButton(
+                icon: Icons.refresh,
+                tooltip: '현재 페이지 다시 인식',
+                onPressed: loading ? null : onRefresh,
+              ),
+              _PanelButton(
+                icon: Icons.close,
+                tooltip: '닫기',
+                onPressed: onClose,
+              ),
+            ],
+          ),
+          Expanded(
+            child: loading
+                ? const Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(
+                            color: Color(0xFF89B4FA),
+                            strokeWidth: 2,
+                          ),
+                        ),
+                        SizedBox(height: 12),
+                        Text(
+                          'OCR 처리 중...',
+                          style: TextStyle(
+                              color: Color(0xFF6C7086), fontSize: 13),
+                        ),
+                      ],
+                    ),
+                  )
+                : error != null
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Text(
+                            error!,
+                            style: const TextStyle(
+                                color: Color(0xFFF38BA8), fontSize: 13),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      )
+                    : text != null && text!.isEmpty
+                        ? const Center(
+                            child: Text(
+                              '인식된 텍스트가 없습니다',
+                              style: TextStyle(
+                                  color: Color(0xFF6C7086), fontSize: 13),
+                            ),
+                          )
+                        : SingleChildScrollView(
+                            padding: const EdgeInsets.all(12),
+                            child: SelectableText(
+                              text ?? '',
+                              style: const TextStyle(
+                                color: Color(0xFFCDD6F4),
+                                fontSize: 13,
+                                height: 1.7,
+                              ),
+                            ),
+                          ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Note Side Panel ─────────────────────────────────────────────────────────
+
+class _NoteSidePanel extends StatelessWidget {
+  const _NoteSidePanel({
+    required this.controller,
+    required this.onChanged,
+    required this.onClose,
+  });
+
+  final TextEditingController controller;
+  final VoidCallback onChanged;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: const Color(0xFF1E1E2E),
+      child: Column(
+        children: [
+          _PanelHeader(
+            icon: Icons.edit_note,
+            title: '노트',
+            actions: [
+              _PanelButton(
+                icon: Icons.copy,
+                tooltip: '복사',
+                onPressed: () {
+                  if (controller.text.isNotEmpty) {
+                    Clipboard.setData(ClipboardData(text: controller.text));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('클립보드에 복사되었습니다'),
+                        duration: Duration(seconds: 1),
+                      ),
+                    );
+                  }
+                },
+              ),
+              _PanelButton(
+                icon: Icons.delete_outline,
+                tooltip: '전체 지우기',
+                onPressed: () {
+                  controller.clear();
+                  onChanged();
+                },
+              ),
+              _PanelButton(
+                icon: Icons.close,
+                tooltip: '닫기',
+                onPressed: onClose,
+              ),
+            ],
+          ),
+          Expanded(
+            child: TextField(
+              controller: controller,
+              onChanged: (_) => onChanged(),
+              maxLines: null,
+              expands: true,
+              textAlignVertical: TextAlignVertical.top,
+              style: const TextStyle(
+                fontFamily: 'Consolas',
+                color: Color(0xFFCDD6F4),
+                fontSize: 13,
+                height: 1.7,
+              ),
+              decoration: const InputDecoration(
+                border: InputBorder.none,
+                contentPadding: EdgeInsets.all(12),
+                hintText: '마크다운으로 노트를 작성하세요...\n\n# 제목\n- 항목 1\n- 항목 2',
+                hintStyle: TextStyle(
+                  color: Color(0xFF45475A),
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Shared Panel Widgets ────────────────────────────────────────────────────
+
+class _PanelHeader extends StatelessWidget {
+  const _PanelHeader({
+    required this.icon,
+    required this.title,
+    required this.actions,
+  });
+
+  final IconData icon;
+  final String title;
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 40,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFF313244))),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: const Color(0xFF89B4FA), size: 16),
+          const SizedBox(width: 8),
+          Text(
+            title,
+            style:
+                const TextStyle(color: Color(0xFFCDD6F4), fontSize: 13),
+          ),
+          const Spacer(),
+          ...actions,
+        ],
+      ),
+    );
+  }
+}
+
+class _PanelButton extends StatelessWidget {
+  const _PanelButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      icon: Icon(icon, size: 16),
+      tooltip: tooltip,
+      onPressed: onPressed,
+      color: onPressed != null
+          ? const Color(0xFF6C7086)
+          : const Color(0xFF45475A),
+      splashRadius: 14,
+      padding: const EdgeInsets.all(4),
+      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+    );
+  }
+}
+
+// ── Bottom Toolbar ──────────────────────────────────────────────────────────
+
 class _BottomToolbar extends ConsumerStatefulWidget {
-  const _BottomToolbar({required this.controller, required this.filePath});
+  const _BottomToolbar({
+    required this.controller,
+    required this.ocrVisible,
+    required this.noteVisible,
+    required this.onOcrPressed,
+    required this.onNotePressed,
+  });
+
   final PdfViewerController controller;
-  final String filePath;
+  final bool ocrVisible;
+  final bool noteVisible;
+  final void Function(int pageNumber) onOcrPressed;
+  final VoidCallback onNotePressed;
 
   @override
   ConsumerState<_BottomToolbar> createState() => _BottomToolbarState();
@@ -142,7 +550,6 @@ class _BottomToolbarState extends ConsumerState<_BottomToolbar> {
     final current = ref.watch(currentPageProvider);
     final total = ref.watch(totalPagesProvider);
 
-    // Sync text field with current page without triggering rebuild loop
     if (_pageInput.text != '$current') {
       _pageInput.text = '$current';
     }
@@ -261,141 +668,21 @@ class _BottomToolbarState extends ConsumerState<_BottomToolbar> {
           _ToolbarButton(
             icon: Icons.document_scanner,
             tooltip: 'OCR 텍스트 추출',
+            active: widget.ocrVisible,
             onPressed: total > 0
-                ? () => _runOcr(context, current)
+                ? () => widget.onOcrPressed(current)
                 : null,
           ),
-        ],
-      ),
-    );
-  }
 
-  void _runOcr(BuildContext context, int pageNumber) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => _OcrResultDialog(
-        filePath: widget.filePath,
-        pageNumber: pageNumber,
-      ),
-    );
-  }
-}
-
-class _OcrResultDialog extends StatefulWidget {
-  const _OcrResultDialog({
-    required this.filePath,
-    required this.pageNumber,
-  });
-
-  final String filePath;
-  final int pageNumber;
-
-  @override
-  State<_OcrResultDialog> createState() => _OcrResultDialogState();
-}
-
-class _OcrResultDialogState extends State<_OcrResultDialog> {
-  String? _text;
-  String? _error;
-  bool _loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _performOcr();
-  }
-
-  Future<void> _performOcr() async {
-    try {
-      final text = await OcrService.recognizePage(
-        widget.filePath,
-        widget.pageNumber,
-      );
-      if (mounted) setState(() { _text = text; _loading = false; });
-    } catch (e) {
-      if (mounted) setState(() { _error = e.toString(); _loading = false; });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      backgroundColor: const Color(0xFF1E1E2E),
-      title: Row(
-        children: [
-          const Icon(Icons.document_scanner,
-              color: Color(0xFF89B4FA), size: 20),
-          const SizedBox(width: 8),
-          Text(
-            'OCR — ${widget.pageNumber}페이지',
-            style: const TextStyle(
-                color: Color(0xFFCDD6F4), fontSize: 16),
+          // Note
+          _ToolbarButton(
+            icon: Icons.edit_note,
+            tooltip: '노트',
+            active: widget.noteVisible,
+            onPressed: total > 0 ? widget.onNotePressed : null,
           ),
-          const Spacer(),
-          if (_text != null)
-            IconButton(
-              icon: const Icon(Icons.copy, size: 18),
-              tooltip: '복사',
-              color: const Color(0xFF89B4FA),
-              onPressed: () {
-                Clipboard.setData(ClipboardData(text: _text!));
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('클립보드에 복사되었습니다'),
-                    duration: Duration(seconds: 1),
-                  ),
-                );
-              },
-            ),
         ],
       ),
-      content: SizedBox(
-        width: 500,
-        height: 400,
-        child: _loading
-            ? const Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    CircularProgressIndicator(color: Color(0xFF89B4FA)),
-                    SizedBox(height: 16),
-                    Text(
-                      'OCR 처리 중...',
-                      style: TextStyle(color: Color(0xFF6C7086)),
-                    ),
-                  ],
-                ),
-              )
-            : _error != null
-                ? Center(
-                    child: Text(
-                      _error!,
-                      style: const TextStyle(color: Color(0xFFF38BA8)),
-                    ),
-                  )
-                : _text!.isEmpty
-                    ? const Center(
-                        child: Text(
-                          '인식된 텍스트가 없습니다',
-                          style: TextStyle(color: Color(0xFF6C7086)),
-                        ),
-                      )
-                    : SelectableText(
-                        _text!,
-                        style: const TextStyle(
-                          color: Color(0xFFCDD6F4),
-                          fontSize: 14,
-                          height: 1.6,
-                        ),
-                      ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('닫기'),
-        ),
-      ],
     );
   }
 }
@@ -405,11 +692,13 @@ class _ToolbarButton extends StatelessWidget {
     required this.icon,
     required this.tooltip,
     required this.onPressed,
+    this.active = false,
   });
 
   final IconData icon;
   final String tooltip;
   final VoidCallback? onPressed;
+  final bool active;
 
   @override
   Widget build(BuildContext context) {
@@ -417,9 +706,11 @@ class _ToolbarButton extends StatelessWidget {
       icon: Icon(icon, size: 20),
       tooltip: tooltip,
       onPressed: onPressed,
-      color: onPressed != null
-          ? const Color(0xFFCDD6F4)
-          : const Color(0xFF45475A),
+      color: active
+          ? const Color(0xFF89B4FA)
+          : onPressed != null
+              ? const Color(0xFFCDD6F4)
+              : const Color(0xFF45475A),
     );
   }
 }
