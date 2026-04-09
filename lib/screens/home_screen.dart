@@ -37,7 +37,6 @@ class HomeScreen extends ConsumerWidget {
     final terminalVisible = ref.watch(terminalVisibleProvider);
 
     return Focus(
-      autofocus: true,
       child: CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.backquote,

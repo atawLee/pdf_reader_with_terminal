@@ -17,6 +17,8 @@ dependencies:
   file_picker: ^8.3.7
   shared_preferences: ^2.3.5
   path: ^1.9.1
+  xterm: ^4.0.0
+  flutter_pty: ^0.4.2
 
 dev_dependencies:
   flutter_test:

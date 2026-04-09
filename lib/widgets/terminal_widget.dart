@@ -2,7 +2,18 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter_pty/flutter_pty.dart';
+import 'package:xterm/xterm.dart';
+
+/// Available shells the user can pick from.
+enum _Shell {
+  powershell('PowerShell', 'powershell.exe'),
+  cmd('CMD', 'cmd.exe');
+
+  const _Shell(this.label, this.executable);
+  final String label;
+  final String executable;
+}
 
 class TerminalWidget extends StatefulWidget {
   const TerminalWidget({super.key});
@@ -12,85 +23,65 @@ class TerminalWidget extends StatefulWidget {
 }
 
 class _TerminalWidgetState extends State<TerminalWidget> {
-  final _scrollController = ScrollController();
-  final _inputController = TextEditingController();
-  final _inputFocusNode = FocusNode();
-  final _outputLines = <_TermLine>[];
-
-  Process? _process;
-  bool _running = false;
+  late Terminal _terminal;
+  final _terminalFocusNode = FocusNode();
+  Pty? _pty;
+  _Shell _shell = _Shell.powershell;
 
   @override
   void initState() {
     super.initState();
-    _startShell();
+    _terminal = Terminal(maxLines: 10000);
+    _startPty();
   }
 
   @override
   void dispose() {
-    _process?.kill();
-    _scrollController.dispose();
-    _inputController.dispose();
-    _inputFocusNode.dispose();
+    _pty?.kill();
+    _terminalFocusNode.dispose();
     super.dispose();
   }
 
-  Future<void> _startShell() async {
-    _process?.kill();
-    _outputLines.clear();
+  void _startPty() {
+    _pty?.kill();
+    _terminal = Terminal(maxLines: 10000);
 
-    final shell = Platform.environment['COMSPEC'] ?? 'cmd.exe';
-    _process = await Process.start(shell, [], runInShell: false);
-    setState(() => _running = true);
+    final pty = Pty.start(
+      _shell.executable,
+      columns: _terminal.viewWidth,
+      rows: _terminal.viewHeight,
+      environment: Platform.environment,
+    );
 
-    _process!.stdout.transform(utf8.decoder).listen(_onStdout);
-    _process!.stderr.transform(utf8.decoder).listen(_onStderr);
-    _process!.exitCode.then((_) {
-      if (mounted) {
-        setState(() => _running = false);
-        _appendLine('--- 셸 종료됨 ---', _LineKind.system);
-      }
+    pty.output.cast<List<int>>().transform(const Utf8Decoder()).listen((data) {
+      _terminal.write(data);
     });
-  }
 
-  void _onStdout(String data) {
-    if (!mounted) return;
-    _appendLine(data, _LineKind.stdout);
-  }
+    _terminal.onOutput = (data) {
+      pty.write(const Utf8Encoder().convert(data));
+    };
 
-  void _onStderr(String data) {
-    if (!mounted) return;
-    _appendLine(data, _LineKind.stderr);
-  }
+    _terminal.onResize = (w, h, _, __) {
+      pty.resize(h, w);
+    };
 
-  void _appendLine(String text, _LineKind kind) {
-    setState(() {
-      _outputLines.add(_TermLine(text, kind));
-      // Keep buffer bounded.
-      if (_outputLines.length > 5000) {
-        _outputLines.removeRange(0, _outputLines.length - 4000);
-      }
-    });
-    _scrollToBottom();
-  }
+    setState(() => _pty = pty);
 
-  void _scrollToBottom() {
+    // Give focus to the terminal after build.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      _terminalFocusNode.requestFocus();
+    });
+
+    pty.exitCode.then((_) {
+      if (mounted) {
+        _terminal.write('\r\n\x1b[90m--- 셸 종료됨 ---\x1b[0m\r\n');
       }
     });
   }
 
-  void _sendCommand(String command) {
-    if (_process == null || !_running) return;
-    _process!.stdin.writeln(command);
-    _inputController.clear();
-    _inputFocusNode.requestFocus();
-  }
-
-  void _clearOutput() {
-    setState(() => _outputLines.clear());
+  void _switchShell(_Shell shell) {
+    setState(() => _shell = shell);
+    _startPty();
   }
 
   @override
@@ -109,119 +100,87 @@ class _TerminalWidgetState extends State<TerminalWidget> {
               const SizedBox(width: 12),
               const Icon(Icons.terminal, size: 14, color: Color(0xFF89B4FA)),
               const SizedBox(width: 6),
-              const Text(
-                '터미널',
-                style: TextStyle(color: Color(0xFFCDD6F4), fontSize: 12),
+              // Shell selector
+              PopupMenuButton<_Shell>(
+                initialValue: _shell,
+                onSelected: _switchShell,
+                tooltip: '셸 변경',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minHeight: 28),
+                position: PopupMenuPosition.under,
+                color: const Color(0xFF1E1E2E),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      _shell.label,
+                      style: const TextStyle(
+                          color: Color(0xFFCDD6F4), fontSize: 12),
+                    ),
+                    const Icon(Icons.arrow_drop_down,
+                        size: 16, color: Color(0xFF6C7086)),
+                  ],
+                ),
+                itemBuilder: (_) => _Shell.values
+                    .map((s) => PopupMenuItem(
+                          value: s,
+                          height: 32,
+                          child: Text(s.label,
+                              style: const TextStyle(fontSize: 12)),
+                        ))
+                    .toList(),
               ),
               const Spacer(),
               _MiniButton(
                 icon: Icons.restart_alt,
                 tooltip: '재시작',
-                onPressed: _startShell,
-              ),
-              _MiniButton(
-                icon: Icons.delete_outline,
-                tooltip: '지우기',
-                onPressed: _clearOutput,
+                onPressed: _startPty,
               ),
             ],
           ),
         ),
 
-        // Output area
+        // Terminal view
         Expanded(
-          child: GestureDetector(
-            onTap: () => _inputFocusNode.requestFocus(),
-            child: Container(
-              color: const Color(0xFF11111B),
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              child: SelectionArea(
-                child: ListView.builder(
-                  controller: _scrollController,
-                  itemCount: _outputLines.length,
-                  itemBuilder: (_, i) {
-                    final line = _outputLines[i];
-                    return Text(
-                      line.text,
-                      style: TextStyle(
-                        fontFamily: 'Consolas',
-                        fontSize: 13,
-                        height: 1.4,
-                        color: switch (line.kind) {
-                          _LineKind.stdout => const Color(0xFFCDD6F4),
-                          _LineKind.stderr => const Color(0xFFF38BA8),
-                          _LineKind.system => const Color(0xFF6C7086),
-                        },
-                      ),
-                    );
-                  },
-                ),
-              ),
+          child: TerminalView(
+            _terminal,
+            focusNode: _terminalFocusNode,
+            autofocus: true,
+            hardwareKeyboardOnly: true,
+            textStyle: const TerminalStyle(
+              fontFamily: 'Consolas',
+              fontSize: 13,
             ),
-          ),
-        ),
-
-        // Input row
-        Container(
-          height: 34,
-          color: const Color(0xFF181825),
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          child: Row(
-            children: [
-              const Text(
-                '>',
-                style: TextStyle(
-                  fontFamily: 'Consolas',
-                  fontSize: 13,
-                  color: Color(0xFF89B4FA),
-                ),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: KeyboardListener(
-                  focusNode: FocusNode(),
-                  onKeyEvent: (event) {
-                    // Let TextField handle Enter via onSubmitted
-                  },
-                  child: TextField(
-                    controller: _inputController,
-                    focusNode: _inputFocusNode,
-                    style: const TextStyle(
-                      fontFamily: 'Consolas',
-                      fontSize: 13,
-                      color: Color(0xFFCDD6F4),
-                    ),
-                    decoration: const InputDecoration(
-                      border: InputBorder.none,
-                      isDense: true,
-                      contentPadding: EdgeInsets.symmetric(vertical: 8),
-                      hintText: '명령어를 입력하세요...',
-                      hintStyle: TextStyle(
-                        color: Color(0xFF45475A),
-                        fontSize: 13,
-                      ),
-                    ),
-                    onSubmitted: (value) {
-                      if (value.isNotEmpty) _sendCommand(value);
-                    },
-                  ),
-                ),
-              ),
-            ],
+            theme: const TerminalTheme(
+              cursor: Color(0xFF89B4FA),
+              selection: Color(0x4089B4FA),
+              foreground: Color(0xFFCDD6F4),
+              background: Color(0xFF11111B),
+              black: Color(0xFF45475A),
+              red: Color(0xFFF38BA8),
+              green: Color(0xFFA6E3A1),
+              yellow: Color(0xFFF9E2AF),
+              blue: Color(0xFF89B4FA),
+              magenta: Color(0xFFF5C2E7),
+              cyan: Color(0xFF94E2D5),
+              white: Color(0xFFBAC2DE),
+              brightBlack: Color(0xFF585B70),
+              brightRed: Color(0xFFF38BA8),
+              brightGreen: Color(0xFFA6E3A1),
+              brightYellow: Color(0xFFF9E2AF),
+              brightBlue: Color(0xFF89B4FA),
+              brightMagenta: Color(0xFFF5C2E7),
+              brightCyan: Color(0xFF94E2D5),
+              brightWhite: Color(0xFFA6ADC8),
+              searchHitBackground: Color(0xFFF9E2AF),
+              searchHitBackgroundCurrent: Color(0xFFFAB387),
+              searchHitForeground: Color(0xFF1E1E2E),
+            ),
           ),
         ),
       ],
     );
   }
-}
-
-enum _LineKind { stdout, stderr, system }
-
-class _TermLine {
-  const _TermLine(this.text, this.kind);
-  final String text;
-  final _LineKind kind;
 }
 
 class _MiniButton extends StatelessWidget {
