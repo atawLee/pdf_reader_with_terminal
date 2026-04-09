@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/services.dart';
@@ -9,12 +10,20 @@ class OcrService {
   /// Renders the given [pageNumber] (1-based) of the PDF at [filePath] and
   /// sends the image to the Windows platform OCR engine.
   static Future<String> recognizePage(String filePath, int pageNumber) async {
+    final pngBytes = await renderPageToPng(filePath, pageNumber);
+    return recognizeFromBytes(pngBytes);
+  }
+
+  /// Render a PDF page to PNG bytes. Also returns the ui.Image via [onImage]
+  /// if provided (caller must dispose it).
+  static Future<Uint8List> renderPageToPng(
+    String filePath,
+    int pageNumber, {
+    double scale = 2.0,
+  }) async {
     final doc = await PdfDocument.openFile(filePath);
     try {
       final page = doc.pages[pageNumber - 1];
-
-      // Render at 2x for better OCR accuracy.
-      const scale = 2.0;
       final renderWidth = (page.width * scale).toInt();
       final renderHeight = (page.height * scale).toInt();
 
@@ -30,7 +39,6 @@ class OcrService {
         throw Exception('Failed to render page $pageNumber');
       }
 
-      // Encode to PNG for the native side.
       final uiImage = await pdfImage.createImage();
       pdfImage.dispose();
 
@@ -42,15 +50,42 @@ class OcrService {
         throw Exception('Failed to encode page image to PNG');
       }
 
-      final pngBytes = byteData.buffer.asUint8List();
-
-      final result = await _channel.invokeMethod<String>('recognize', {
-        'imageBytes': pngBytes,
-      });
-
-      return result ?? '';
+      return byteData.buffer.asUint8List();
     } finally {
       await doc.dispose();
     }
+  }
+
+  /// Send raw PNG bytes to the native OCR engine.
+  static Future<String> recognizeFromBytes(Uint8List pngBytes) async {
+    final result = await _channel.invokeMethod<String>('recognize', {
+      'imageBytes': pngBytes,
+    });
+    return result ?? '';
+  }
+
+  /// Crop a [ui.Image] to [rect] and return PNG bytes.
+  static Future<Uint8List> cropImageToPng(ui.Image image, Rect rect) async {
+    final recorder = ui.PictureRecorder();
+    final canvas = ui.Canvas(recorder);
+    canvas.drawImageRect(
+      image,
+      rect,
+      Rect.fromLTWH(0, 0, rect.width, rect.height),
+      ui.Paint(),
+    );
+    final picture = recorder.endRecording();
+    final cropped =
+        await picture.toImage(rect.width.toInt(), rect.height.toInt());
+    picture.dispose();
+
+    final byteData =
+        await cropped.toByteData(format: ui.ImageByteFormat.png);
+    cropped.dispose();
+
+    if (byteData == null) {
+      throw Exception('Failed to encode cropped image');
+    }
+    return byteData.buffer.asUint8List();
   }
 }

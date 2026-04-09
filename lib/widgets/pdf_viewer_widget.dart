@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -29,6 +30,10 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
   String? _ocrText;
   String? _ocrError;
   int _ocrPage = 0;
+
+  // Region OCR state
+  bool _regionSelectMode = false;
+  ui.Image? _regionPageImage;
 
   // Note side panel state
   bool _noteVisible = false;
@@ -91,6 +96,79 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
       }
     } catch (e) {
       if (mounted && _ocrPage == pageNumber) {
+        setState(() {
+          _ocrError = e.toString();
+          _ocrLoading = false;
+        });
+      }
+    }
+  }
+
+  // ── Region OCR ─────────────────────────────────────────────────────────────
+
+  Future<void> _startRegionSelect() async {
+    final page = ref.read(currentPageProvider);
+    setState(() {
+      _regionSelectMode = true;
+      _regionPageImage = null;
+    });
+
+    try {
+      final pngBytes = await OcrService.renderPageToPng(widget.filePath, page);
+      if (!mounted || !_regionSelectMode) return;
+
+      final codec = await ui.instantiateImageCodec(pngBytes);
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+
+      if (mounted && _regionSelectMode) {
+        setState(() => _regionPageImage = frame.image);
+      } else {
+        frame.image.dispose();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _regionSelectMode = false);
+      }
+    }
+  }
+
+  void _cancelRegionSelect() {
+    _regionPageImage?.dispose();
+    setState(() {
+      _regionSelectMode = false;
+      _regionPageImage = null;
+    });
+  }
+
+  Future<void> _onRegionSelected(Rect imageRect) async {
+    final image = _regionPageImage;
+    if (image == null) return;
+
+    final page = ref.read(currentPageProvider);
+    setState(() {
+      _regionSelectMode = false;
+      _regionPageImage = null;
+      _ocrVisible = true;
+      _ocrLoading = true;
+      _ocrText = null;
+      _ocrError = null;
+      _ocrPage = page;
+    });
+
+    try {
+      final croppedPng = await OcrService.cropImageToPng(image, imageRect);
+      image.dispose();
+      final text = await OcrService.recognizeFromBytes(croppedPng);
+      if (mounted) {
+        setState(() {
+          _ocrText = text;
+          _ocrLoading = false;
+        });
+      }
+    } catch (e) {
+      image.dispose();
+      if (mounted) {
         setState(() {
           _ocrError = e.toString();
           _ocrLoading = false;
@@ -260,6 +338,33 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
                       ),
                     ),
 
+                    // Region select overlay
+                    if (_regionSelectMode)
+                      Positioned.fill(
+                        child: _regionPageImage == null
+                            ? Container(
+                                color: const Color(0xAA000000),
+                                child: const Center(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      CircularProgressIndicator(
+                                          color: Color(0xFF89B4FA)),
+                                      SizedBox(height: 12),
+                                      Text('페이지 렌더링 중...',
+                                          style: TextStyle(
+                                              color: Color(0xFFCDD6F4))),
+                                    ],
+                                  ),
+                                ),
+                              )
+                            : _RegionSelectOverlay(
+                                pageImage: _regionPageImage!,
+                                onSelected: _onRegionSelected,
+                                onCancel: _cancelRegionSelect,
+                              ),
+                      ),
+
                     // Bottom toolbar
                     Positioned(
                       left: 0,
@@ -270,6 +375,7 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
                         ocrVisible: _ocrVisible,
                         noteVisible: _noteVisible,
                         onOcrPressed: (page) => _toggleOcr(page),
+                        onRegionOcrPressed: _startRegionSelect,
                         onNotePressed: () {
                           if (_noteVisible) {
                             if (_noteDirty) _saveNote();
@@ -326,6 +432,178 @@ class _PdfViewerWidgetState extends ConsumerState<PdfViewerWidget> {
               .clamp(1, ref.read(totalPagesProvider)));
     }
   }
+}
+
+// ── Region Select Overlay ────────────────────────────────────────────────────
+
+class _RegionSelectOverlay extends StatefulWidget {
+  const _RegionSelectOverlay({
+    required this.pageImage,
+    required this.onSelected,
+    required this.onCancel,
+  });
+
+  final ui.Image pageImage;
+  final void Function(Rect imageRect) onSelected;
+  final VoidCallback onCancel;
+
+  @override
+  State<_RegionSelectOverlay> createState() => _RegionSelectOverlayState();
+}
+
+class _RegionSelectOverlayState extends State<_RegionSelectOverlay> {
+  Offset? _start;
+  Offset? _current;
+
+  Rect? get _selectionRect {
+    if (_start == null || _current == null) return null;
+    return Rect.fromPoints(_start!, _current!);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final imgW = widget.pageImage.width.toDouble();
+        final imgH = widget.pageImage.height.toDouble();
+        final boxW = constraints.maxWidth;
+        final boxH = constraints.maxHeight;
+
+        // Fit image in box.
+        final scale = (boxW / imgW).clamp(0.0, boxH / imgH);
+        final displayW = imgW * scale;
+        final displayH = imgH * scale;
+        final offsetX = (boxW - displayW) / 2;
+        final offsetY = (boxH - displayH) / 2;
+        final imageDisplayRect =
+            Rect.fromLTWH(offsetX, offsetY, displayW, displayH);
+
+        return KeyboardListener(
+          focusNode: FocusNode()..requestFocus(),
+          autofocus: true,
+          onKeyEvent: (event) {
+            if (event is KeyDownEvent &&
+                event.logicalKey == LogicalKeyboardKey.escape) {
+              widget.onCancel();
+            }
+          },
+          child: MouseRegion(
+            cursor: SystemMouseCursors.precise,
+            child: GestureDetector(
+              onPanStart: (d) => setState(() {
+                _start = d.localPosition;
+                _current = d.localPosition;
+              }),
+              onPanUpdate: (d) =>
+                  setState(() => _current = d.localPosition),
+              onPanEnd: (_) {
+                final sel = _selectionRect;
+                if (sel != null && sel.width > 10 && sel.height > 10) {
+                  // Map display coords to image coords.
+                  final imgRect = Rect.fromLTRB(
+                    ((sel.left - offsetX) / scale).clamp(0.0, imgW),
+                    ((sel.top - offsetY) / scale).clamp(0.0, imgH),
+                    ((sel.right - offsetX) / scale).clamp(0.0, imgW),
+                    ((sel.bottom - offsetY) / scale).clamp(0.0, imgH),
+                  );
+                  if (imgRect.width > 5 && imgRect.height > 5) {
+                    widget.onSelected(imgRect);
+                    return;
+                  }
+                }
+                setState(() {
+                  _start = null;
+                  _current = null;
+                });
+              },
+              child: CustomPaint(
+                painter: _RegionSelectPainter(
+                  image: widget.pageImage,
+                  imageDisplayRect: imageDisplayRect,
+                  selection: _selectionRect,
+                ),
+                size: Size(boxW, boxH),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _RegionSelectPainter extends CustomPainter {
+  _RegionSelectPainter({
+    required this.image,
+    required this.imageDisplayRect,
+    required this.selection,
+  });
+
+  final ui.Image image;
+  final Rect imageDisplayRect;
+  final Rect? selection;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // Draw the page image.
+    canvas.drawImageRect(
+      image,
+      Rect.fromLTWH(
+          0, 0, image.width.toDouble(), image.height.toDouble()),
+      imageDisplayRect,
+      Paint(),
+    );
+
+    // Dim overlay.
+    final dimPaint = Paint()..color = const Color(0xAA000000);
+
+    if (selection != null && selection!.width > 2 && selection!.height > 2) {
+      final sel = selection!;
+      // Top
+      canvas.drawRect(
+          Rect.fromLTRB(0, 0, size.width, sel.top), dimPaint);
+      // Bottom
+      canvas.drawRect(
+          Rect.fromLTRB(0, sel.bottom, size.width, size.height), dimPaint);
+      // Left
+      canvas.drawRect(
+          Rect.fromLTRB(0, sel.top, sel.left, sel.bottom), dimPaint);
+      // Right
+      canvas.drawRect(
+          Rect.fromLTRB(sel.right, sel.top, size.width, sel.bottom),
+          dimPaint);
+
+      // Selection border.
+      canvas.drawRect(
+        sel,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..color = const Color(0xFF89B4FA)
+          ..strokeWidth = 2,
+      );
+    } else {
+      // Light dim when no selection yet.
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, size.width, size.height),
+        Paint()..color = const Color(0x55000000),
+      );
+
+      // Hint text.
+      final tp = TextPainter(
+        text: const TextSpan(
+          text: '드래그하여 OCR 영역을 선택하세요  (Esc: 취소)',
+          style: TextStyle(color: Color(0xFFCDD6F4), fontSize: 14),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(
+          canvas, Offset((size.width - tp.width) / 2, size.height / 2 - 8));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _RegionSelectPainter old) =>
+      old.selection != selection;
 }
 
 // ── OCR Side Panel ──────────────────────────────────────────────────────────
@@ -602,6 +880,7 @@ class _BottomToolbar extends ConsumerStatefulWidget {
     required this.ocrVisible,
     required this.noteVisible,
     required this.onOcrPressed,
+    required this.onRegionOcrPressed,
     required this.onNotePressed,
   });
 
@@ -609,6 +888,7 @@ class _BottomToolbar extends ConsumerStatefulWidget {
   final bool ocrVisible;
   final bool noteVisible;
   final void Function(int pageNumber) onOcrPressed;
+  final VoidCallback onRegionOcrPressed;
   final VoidCallback onNotePressed;
 
   @override
@@ -749,14 +1029,21 @@ class _BottomToolbarState extends ConsumerState<_BottomToolbar> {
               color: Color(0xFF313244), width: 1, indent: 8, endIndent: 8),
           const SizedBox(width: 16),
 
-          // OCR
+          // OCR (full page)
           _ToolbarButton(
             icon: Icons.document_scanner,
-            tooltip: 'OCR 텍스트 추출',
+            tooltip: 'OCR 전체 페이지',
             active: widget.ocrVisible,
             onPressed: total > 0
                 ? () => widget.onOcrPressed(current)
                 : null,
+          ),
+
+          // OCR (region)
+          _ToolbarButton(
+            icon: Icons.crop,
+            tooltip: 'OCR 영역 지정',
+            onPressed: total > 0 ? widget.onRegionOcrPressed : null,
           ),
 
           // Note
