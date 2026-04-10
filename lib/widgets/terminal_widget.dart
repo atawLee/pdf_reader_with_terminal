@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_pty/flutter_pty.dart';
 import 'package:xterm/xterm.dart';
 
@@ -28,6 +29,15 @@ class _TerminalWidgetState extends State<TerminalWidget> {
   Pty? _pty;
   _Shell _shell = _Shell.powershell;
 
+  /// 한글 입력창
+  final _inputController = TextEditingController();
+  final _inputFocusNode = FocusNode();
+  bool _showInputBar = false;
+
+  /// 명령 히스토리 (입력창 모드용)
+  final List<String> _history = [];
+  int _historyIndex = -1;
+
   @override
   void initState() {
     super.initState();
@@ -39,6 +49,8 @@ class _TerminalWidgetState extends State<TerminalWidget> {
   void dispose() {
     _pty?.kill();
     _terminalFocusNode.dispose();
+    _inputController.dispose();
+    _inputFocusNode.dispose();
     super.dispose();
   }
 
@@ -67,7 +79,6 @@ class _TerminalWidgetState extends State<TerminalWidget> {
 
     setState(() => _pty = pty);
 
-    // Give focus to the terminal after build.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _terminalFocusNode.requestFocus();
     });
@@ -84,11 +95,97 @@ class _TerminalWidgetState extends State<TerminalWidget> {
     _startPty();
   }
 
+  // ── 한글 입력창 ──
+
+  void _toggleInputBar() {
+    setState(() => _showInputBar = !_showInputBar);
+    if (_showInputBar) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _inputFocusNode.requestFocus();
+      });
+    } else {
+      _inputController.clear();
+      _historyIndex = -1;
+      _terminalFocusNode.requestFocus();
+    }
+  }
+
+  void _onInputSubmitted(String text) {
+    final pty = _pty;
+    if (pty == null) return;
+
+    if (text.isNotEmpty) {
+      _history.add(text);
+    }
+    _historyIndex = -1;
+
+    final cr = Platform.isWindows ? '\r\n' : '\n';
+    pty.write(const Utf8Encoder().convert(text + cr));
+    _inputController.clear();
+    _inputFocusNode.requestFocus();
+  }
+
+  KeyEventResult _onInputKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+
+    // Esc 또는 F1 → 입력창 닫기
+    if (event.logicalKey == LogicalKeyboardKey.escape ||
+        event.logicalKey == LogicalKeyboardKey.f1) {
+      _toggleInputBar();
+      return KeyEventResult.handled;
+    }
+
+    // Ctrl+C → 인터럽트
+    if (event.logicalKey == LogicalKeyboardKey.keyC &&
+        HardwareKeyboard.instance.isControlPressed) {
+      _pty?.write(const Utf8Encoder().convert('\x03'));
+      _inputController.clear();
+      return KeyEventResult.handled;
+    }
+
+    // 위 화살표 → 이전 히스토리
+    if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+      if (_history.isNotEmpty) {
+        if (_historyIndex == -1) {
+          _historyIndex = _history.length - 1;
+        } else if (_historyIndex > 0) {
+          _historyIndex--;
+        }
+        _inputController.text = _history[_historyIndex];
+        _inputController.selection = TextSelection.collapsed(
+          offset: _inputController.text.length,
+        );
+      }
+      return KeyEventResult.handled;
+    }
+
+    // 아래 화살표 → 다음 히스토리
+    if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+      if (_historyIndex != -1) {
+        if (_historyIndex < _history.length - 1) {
+          _historyIndex++;
+          _inputController.text = _history[_historyIndex];
+        } else {
+          _historyIndex = -1;
+          _inputController.clear();
+        }
+        _inputController.selection = TextSelection.collapsed(
+          offset: _inputController.text.length,
+        );
+      }
+      return KeyEventResult.handled;
+    }
+
+    return KeyEventResult.ignored;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
       children: [
-        // Tab bar
+        // ── Tab bar ──
         Container(
           height: 32,
           decoration: const BoxDecoration(
@@ -100,7 +197,6 @@ class _TerminalWidgetState extends State<TerminalWidget> {
               const SizedBox(width: 12),
               const Icon(Icons.terminal, size: 14, color: Color(0xFF89B4FA)),
               const SizedBox(width: 6),
-              // Shell selector
               PopupMenuButton<_Shell>(
                 initialValue: _shell,
                 onSelected: _switchShell,
@@ -115,69 +211,162 @@ class _TerminalWidgetState extends State<TerminalWidget> {
                     Text(
                       _shell.label,
                       style: const TextStyle(
-                          color: Color(0xFFCDD6F4), fontSize: 12),
+                        color: Color(0xFFCDD6F4),
+                        fontSize: 12,
+                      ),
                     ),
-                    const Icon(Icons.arrow_drop_down,
-                        size: 16, color: Color(0xFF6C7086)),
+                    const Icon(
+                      Icons.arrow_drop_down,
+                      size: 16,
+                      color: Color(0xFF6C7086),
+                    ),
                   ],
                 ),
                 itemBuilder: (_) => _Shell.values
-                    .map((s) => PopupMenuItem(
-                          value: s,
-                          height: 32,
-                          child: Text(s.label,
-                              style: const TextStyle(fontSize: 12)),
-                        ))
+                    .map(
+                      (s) => PopupMenuItem(
+                        value: s,
+                        height: 32,
+                        child: Text(
+                          s.label,
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    )
                     .toList(),
               ),
               const Spacer(),
-              _MiniButton(
-                icon: Icons.restart_alt,
-                tooltip: '재시작',
-                onPressed: _startPty,
+              // 한글 입력창 토글
+              Tooltip(
+                message: '한글 입력 (F1)',
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: _toggleInputBar,
+                    borderRadius: BorderRadius.circular(4),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: _showInputBar
+                            ? const Color(0xFF89B4FA).withValues(alpha: 0.15)
+                            : Colors.transparent,
+                        borderRadius: BorderRadius.circular(4),
+                        border: _showInputBar
+                            ? Border.all(
+                                color: const Color(0xFF89B4FA)
+                                    .withValues(alpha: 0.4),
+                              )
+                            : null,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.keyboard,
+                            size: 13,
+                            color: _showInputBar
+                                ? const Color(0xFF89B4FA)
+                                : const Color(0xFF6C7086),
+                          ),
+                          const SizedBox(width: 3),
+                          Text(
+                            '한글',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: _showInputBar
+                                  ? const Color(0xFF89B4FA)
+                                  : const Color(0xFF6C7086),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               ),
+              const SizedBox(width: 4),
             ],
           ),
         ),
 
-        // Terminal view
+        // ── Terminal view ──
         Expanded(
           child: TerminalView(
             _terminal,
             focusNode: _terminalFocusNode,
-            autofocus: true,
-            hardwareKeyboardOnly: true,
             textStyle: const TerminalStyle(
-              fontFamily: 'Consolas',
               fontSize: 13,
+              fontFamily: 'Consolas',
             ),
-            theme: const TerminalTheme(
-              cursor: Color(0xFF89B4FA),
-              selection: Color(0x4089B4FA),
-              foreground: Color(0xFFCDD6F4),
-              background: Color(0xFF11111B),
-              black: Color(0xFF45475A),
-              red: Color(0xFFF38BA8),
-              green: Color(0xFFA6E3A1),
-              yellow: Color(0xFFF9E2AF),
-              blue: Color(0xFF89B4FA),
-              magenta: Color(0xFFF5C2E7),
-              cyan: Color(0xFF94E2D5),
-              white: Color(0xFFBAC2DE),
-              brightBlack: Color(0xFF585B70),
-              brightRed: Color(0xFFF38BA8),
-              brightGreen: Color(0xFFA6E3A1),
-              brightYellow: Color(0xFFF9E2AF),
-              brightBlue: Color(0xFF89B4FA),
-              brightMagenta: Color(0xFFF5C2E7),
-              brightCyan: Color(0xFF94E2D5),
-              brightWhite: Color(0xFFA6ADC8),
-              searchHitBackground: Color(0xFFF9E2AF),
-              searchHitBackgroundCurrent: Color(0xFFFAB387),
-              searchHitForeground: Color(0xFF1E1E2E),
-            ),
+            onKeyEvent: (node, event) {
+              if (event is KeyDownEvent &&
+                  event.logicalKey == LogicalKeyboardKey.f1) {
+                _toggleInputBar();
+                return KeyEventResult.handled;
+              }
+              return KeyEventResult.ignored;
+            },
           ),
         ),
+
+        // ── 한글 입력 바 (토글) ──
+        if (_showInputBar)
+          Container(
+            height: 36,
+            decoration: const BoxDecoration(
+              color: Color(0xFF1E1E2E),
+              border: Border(top: BorderSide(color: Color(0xFF313244))),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(
+              children: [
+                const Text(
+                  '\$',
+                  style: TextStyle(
+                    color: Color(0xFF89B4FA),
+                    fontSize: 13,
+                    fontFamily: 'Consolas',
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Focus(
+                    onKeyEvent: _onInputKeyEvent,
+                    child: TextField(
+                      controller: _inputController,
+                      focusNode: _inputFocusNode,
+                      style: const TextStyle(
+                        color: Color(0xFFCDD6F4),
+                        fontSize: 13,
+                        fontFamily: 'Consolas',
+                      ),
+                      decoration: const InputDecoration(
+                        hintText: '한글 입력 후 Enter · F1/Esc로 닫기',
+                        hintStyle: TextStyle(
+                          color: Color(0xFF585B70),
+                          fontSize: 12,
+                        ),
+                        border: InputBorder.none,
+                        isDense: true,
+                        contentPadding: EdgeInsets.symmetric(vertical: 8),
+                      ),
+                      cursorColor: const Color(0xFF89B4FA),
+                      onSubmitted: _onInputSubmitted,
+                    ),
+                  ),
+                ),
+                _MiniButton(
+                  icon: Icons.send,
+                  tooltip: '전송 (Enter)',
+                  onPressed: () => _onInputSubmitted(_inputController.text),
+                ),
+              ],
+            ),
+          ),
       ],
     );
   }
