@@ -32,7 +32,7 @@ class _TerminalWidgetState extends State<TerminalWidget> {
   /// 한글 입력창
   final _inputController = TextEditingController();
   final _inputFocusNode = FocusNode();
-  bool _showInputBar = false;
+  bool _showInputBar = true;
 
   /// 명령 히스토리 (입력창 모드용)
   final List<String> _history = [];
@@ -119,8 +119,13 @@ class _TerminalWidgetState extends State<TerminalWidget> {
     }
     _historyIndex = -1;
 
-    final cr = Platform.isWindows ? '\r\n' : '\n';
-    pty.write(const Utf8Encoder().convert(text + cr));
+    // 텍스트와 CR을 분리하여 전송
+    // 대화형 프로그램(Claude Code 등)은 실시간 키 입력을 기대하므로
+    // 텍스트를 먼저 보내고 \r(Enter)을 별도로 보내야 제출로 인식됨
+    if (text.isNotEmpty) {
+      pty.write(const Utf8Encoder().convert(text));
+    }
+    pty.write(const Utf8Encoder().convert('\r'));
     _inputController.clear();
     _inputFocusNode.requestFocus();
   }
